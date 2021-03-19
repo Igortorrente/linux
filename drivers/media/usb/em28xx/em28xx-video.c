@@ -1897,7 +1897,7 @@ static int vidioc_g_chip_info(struct file *file, void *priv,
 		strscpy(chip->name, "ac97", sizeof(chip->name));
 	else
 		strscpy(chip->name,
-			dev->v4l2->v4l2_dev.name, sizeof(chip->name));
+			dev->v4l2->v4l2_dev->name, sizeof(chip->name));
 	return 0;
 }
 
@@ -2114,21 +2114,6 @@ static int radio_s_tuner(struct file *file, void *priv,
 }
 
 /*
- * em28xx_free_v4l2() - Free struct em28xx_v4l2
- *
- * @ref: struct kref for struct em28xx_v4l2
- *
- * Called when all users of struct em28xx_v4l2 are gone
- */
-static void em28xx_free_v4l2(struct kref *ref)
-{
-	struct em28xx_v4l2 *v4l2 = container_of(ref, struct em28xx_v4l2, ref);
-
-	v4l2->dev->v4l2 = NULL;
-	kfree(v4l2);
-}
-
-/*
  * em28xx_v4l2_open()
  * inits the device and starts isoc transfer
  */
@@ -2153,12 +2138,21 @@ static int em28xx_v4l2_open(struct file *filp)
 		return -EINVAL;
 	}
 
+	/* To prevent the case when the v4l2_device_put() has already being called,
+	 * the ref is now 0, we call a v4l2_device_get, and end up accessing freed
+	 * resources. Or straigth accessing a freed v4l2.
+	 */
+	if (!v4l2 || !kref_get_unless_zero(&v4l2->v4l2_dev.ref))
+		return -ENODEV;
+
 	em28xx_videodbg("open dev=%s type=%s users=%d\n",
 			video_device_node_name(vdev), v4l2_type_names[fh_type],
 			v4l2->users);
 
-	if (mutex_lock_interruptible(&dev->lock))
+	if (mutex_lock_interruptible(&dev->lock)) {
+		v4l2_device_put(&v4l2->v4l2_dev);
 		return -ERESTARTSYS;
+	}
 
 	ret = v4l2_fh_open(filp);
 	if (ret) {
@@ -2166,6 +2160,7 @@ static int em28xx_v4l2_open(struct file *filp)
 			"%s: v4l2_fh_open() returned error %d\n",
 		       __func__, ret);
 		mutex_unlock(&dev->lock);
+		v4l2_device_put(&v4l2->v4l2_dev);
 		return ret;
 	}
 
@@ -2187,8 +2182,6 @@ static int em28xx_v4l2_open(struct file *filp)
 		v4l2_device_call_all(&v4l2->v4l2_dev, 0, tuner, s_radio);
 	}
 
-	kref_get(&dev->ref);
-	kref_get(&v4l2->ref);
 	v4l2->users++;
 
 	mutex_unlock(&dev->lock);
@@ -2222,36 +2215,30 @@ static int em28xx_v4l2_fini(struct em28xx *dev)
 
 	mutex_lock(&dev->lock);
 
-	v4l2_device_disconnect(&v4l2->v4l2_dev);
-
 	em28xx_uninit_usb_xfer(dev, EM28XX_ANALOG_MODE);
 
-	em28xx_v4l2_media_release(dev);
-
 	if (video_is_registered(&v4l2->radio_dev)) {
-		dev_info(&dev->intf->dev, "V4L2 device %s deregistered\n",
+		dev_info(&dev->intf->dev,
+			 "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->radio_dev));
-		video_unregister_device(&v4l2->radio_dev);
+		vb2_video_unregister_device(&v4l2->radio_dev);
 	}
 	if (video_is_registered(&v4l2->vbi_dev)) {
-		dev_info(&dev->intf->dev, "V4L2 device %s deregistered\n",
+		dev_info(&dev->intf->dev,
+			 "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->vbi_dev));
-		video_unregister_device(&v4l2->vbi_dev);
+		vb2_video_unregister_device(&v4l2->vbi_dev);
 	}
 	if (video_is_registered(&v4l2->vdev)) {
-		dev_info(&dev->intf->dev, "V4L2 device %s deregistered\n",
+		dev_info(&dev->intf->dev,
+			 "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->vdev));
-		video_unregister_device(&v4l2->vdev);
+		vb2_video_unregister_device(&v4l2->vdev);
 	}
-
-	v4l2_ctrl_handler_free(&v4l2->ctrl_handler);
-	v4l2_device_unregister(&v4l2->v4l2_dev);
-
-	kref_put(&v4l2->ref, em28xx_free_v4l2);
 
 	mutex_unlock(&dev->lock);
 
-	kref_put(&dev->ref, em28xx_free_device);
+	v4l2_device_put(&v4l2->v4l2_dev);
 
 	return 0;
 }
@@ -2323,9 +2310,8 @@ static int em28xx_v4l2_close(struct file *filp)
 
 exit:
 	v4l2->users--;
-	kref_put(&v4l2->ref, em28xx_free_v4l2);
 	mutex_unlock(&dev->lock);
-	kref_put(&dev->ref, em28xx_free_device);
+	v4l2_device_put(&v4l2->v4l2_dev);
 
 	return 0;
 }
@@ -2517,6 +2503,28 @@ static void em28xx_tuner_setup(struct em28xx *dev, unsigned short tuner_addr)
 	v4l2_device_call_all(v4l2_dev, 0, tuner, s_frequency, &f);
 }
 
+static void em28xx_v4l2_dev_unregister(struct em28xx *dev)
+{
+	struct em28xx_v4l2 *v4l2 = dev->v4l2;
+
+	v4l2_device_unregister(&v4l2->v4l2_dev);
+	em28xx_v4l2_media_release(dev);
+	v4l2_ctrl_handler_free(&v4l2->ctrl_handler);
+}
+
+static void em28xx_v4l2_dev_release(struct v4l2_device *v4l2_dev)
+{
+	struct em28xx *dev = v4l2_dev->dev->driver_data;
+
+	mutex_lock(&dev->lock);
+	em28xx_v4l2_dev_unregister(dev);
+	kfree(dev->v4l2);
+	dev->v4l2 = NULL;
+	mutex_unlock(&dev->lock);
+
+	kref_put(&dev->ref, em28xx_free_device);
+}
+
 static int em28xx_v4l2_init(struct em28xx *dev)
 {
 	u8 val;
@@ -2524,6 +2532,7 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 	unsigned int maxw;
 	struct v4l2_ctrl_handler *hdl;
 	struct em28xx_v4l2 *v4l2;
+	struct v4l2_subdev *sd;
 
 	if (dev->is_audio_only) {
 		/* Shouldn't initialize IR for this interface */
@@ -2541,12 +2550,13 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 
 	v4l2 = kzalloc(sizeof(*v4l2), GFP_KERNEL);
 	if (!v4l2) {
-		mutex_unlock(&dev->lock);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err;
 	}
-	kref_init(&v4l2->ref);
+
 	v4l2->dev = dev;
 	dev->v4l2 = v4l2;
+	v4l2->v4l2_dev.release = em28xx_v4l2_dev_release;
 
 #ifdef CONFIG_MEDIA_CONTROLLER
 	v4l2->v4l2_dev.mdev = dev->media_dev;
@@ -2555,7 +2565,7 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 	if (ret < 0) {
 		dev_err(&dev->intf->dev,
 			"Call to v4l2_device_register() failed!\n");
-		goto err;
+		goto free_v4l2;
 	}
 
 	hdl = &v4l2->ctrl_handler;
@@ -2574,25 +2584,53 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 
 	/* request some modules */
 
-	if (dev->has_msp34xx)
-		v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
-				    &dev->i2c_adap[dev->def_i2c_bus],
-				    "msp3400", 0, msp3400_addrs);
+	if (dev->has_msp34xx) {
+		sd = v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
+					 &dev->i2c_adap[dev->def_i2c_bus],
+					 "msp3400", 0, msp3400_addrs);
+		if (!sd) {
+			dev_err(&dev->intf->dev,
+				"Error while registering 'msp34xx' v4l2 subdevice!\n");
+			ret = -EINVAL;
+			goto unregister_dev;
+		}
+	}
 
-	if (dev->board.decoder == EM28XX_SAA711X)
-		v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
-				    &dev->i2c_adap[dev->def_i2c_bus],
-				    "saa7115_auto", 0, saa711x_addrs);
+	if (dev->board.decoder == EM28XX_SAA711X) {
+		sd = v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
+					 &dev->i2c_adap[dev->def_i2c_bus],
+					 "saa7115_auto", 0, saa711x_addrs);
+		if (!sd) {
+			dev_err(&dev->intf->dev,
+				"Error while registering 'EM28XX_SAA711X' v4l2 subdevice!\n");
+			ret = -EINVAL;
+			goto unregister_dev;
+		}
+	}
 
-	if (dev->board.decoder == EM28XX_TVP5150)
-		v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
-				    &dev->i2c_adap[dev->def_i2c_bus],
-				    "tvp5150", 0, tvp5150_addrs);
+	if (dev->board.decoder == EM28XX_TVP5150) {
+		sd = v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
+					 &dev->i2c_adap[dev->def_i2c_bus],
+					 "tvp5150", 0, tvp5150_addrs);
+		if (!sd) {
+			dev_err(&dev->intf->dev,
+				"Error while registering 'EM28XX_TVP5150' v4l2 subdevice!\n");
+			ret = -EINVAL;
+			goto unregister_dev;
+		}
+	}
 
-	if (dev->board.adecoder == EM28XX_TVAUDIO)
-		v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
-				    &dev->i2c_adap[dev->def_i2c_bus],
-				    "tvaudio", dev->board.tvaudio_addr, NULL);
+	if (dev->board.adecoder == EM28XX_TVAUDIO) {
+		sd = v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
+					 &dev->i2c_adap[dev->def_i2c_bus],
+					 "tvaudio", dev->board.tvaudio_addr, NULL);
+		if (!sd) {
+			dev_err(&dev->intf->dev,
+				"Error while registering 'EM28XX_TVAUDIO' v4l2 subdevice!\n");
+			ret = -EINVAL;
+			goto unregister_dev;
+		}
+	}
 
 	/* Initialize tuner and camera */
 
@@ -2600,33 +2638,63 @@ static int em28xx_v4l2_init(struct em28xx *dev)
 		unsigned short tuner_addr = dev->board.tuner_addr;
 		int has_demod = (dev->board.tda9887_conf & TDA9887_PRESENT);
 
-		if (dev->board.radio.type)
-			v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
-					    &dev->i2c_adap[dev->def_i2c_bus],
-					    "tuner", dev->board.radio_addr,
-					    NULL);
+		if (dev->board.radio.type) {
+			sd = v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
+						 &dev->i2c_adap[dev->def_i2c_bus],
+						 "tuner", dev->board.radio_addr,
+						 NULL);
+			if (!sd) {
+				dev_err(&dev->intf->dev,
+					"Error while registering '%s' v4l2 subdevice!\n",
+					 dev->board.name);
+				ret = -EINVAL;
+				goto unregister_dev;
+			}
+		}
 
-		if (has_demod)
-			v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
-					    &dev->i2c_adap[dev->def_i2c_bus],
-					    "tuner", 0,
-					    v4l2_i2c_tuner_addrs(ADDRS_DEMOD));
+		if (has_demod) {
+			sd = v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
+						 &dev->i2c_adap[dev->def_i2c_bus],
+						 "tuner", 0,
+						 v4l2_i2c_tuner_addrs(ADDRS_DEMOD));
+			if (!sd) {
+				dev_err(&dev->intf->dev,
+					"Error while registering '%s' v4l2 subdevice!\n",
+					 dev->i2c_adap[dev->def_i2c_bus].name);
+				ret = -EINVAL;
+				goto unregister_dev;
+			}
+		}
+
 		if (tuner_addr == 0) {
 			enum v4l2_i2c_tuner_type type =
 				has_demod ? ADDRS_TV_WITH_DEMOD : ADDRS_TV;
-			struct v4l2_subdev *sd;
 
 			sd = v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
 						 &dev->i2c_adap[dev->def_i2c_bus],
 						 "tuner", 0,
 						 v4l2_i2c_tuner_addrs(type));
-
-			if (sd)
+			if (sd) {
 				tuner_addr = v4l2_i2c_subdev_addr(sd);
+			} else {
+				dev_err(&dev->intf->dev,
+					"Error while registering '%s' v4l2 subdevice!\n",
+					 dev->i2c_adap[dev->def_i2c_bus].name);
+				ret = -EINVAL;
+				goto unregister_dev;
+			}
+
 		} else {
-			v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
-					    &dev->i2c_adap[dev->def_i2c_bus],
-					    "tuner", tuner_addr, NULL);
+			sd = v4l2_i2c_new_subdev(&v4l2->v4l2_dev,
+						 &dev->i2c_adap[dev->def_i2c_bus],
+						 "tuner", tuner_addr, NULL);
+			if (!sd) {
+				dev_err(&dev->intf->dev,
+					"Error while registering '%s' v4l2 subdevice!\n",
+					 dev->i2c_adap[dev->def_i2c_bus].name);
+				ret = -EINVAL;
+				goto unregister_dev;
+			}
 		}
 
 		em28xx_tuner_setup(dev, tuner_addr);
@@ -2889,26 +2957,26 @@ unregister_dev:
 		dev_info(&dev->intf->dev,
 			 "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->radio_dev));
-		video_unregister_device(&v4l2->radio_dev);
+		vb2_video_unregister_device(&v4l2->radio_dev);
 	}
 	if (video_is_registered(&v4l2->vbi_dev)) {
 		dev_info(&dev->intf->dev,
 			 "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->vbi_dev));
-		video_unregister_device(&v4l2->vbi_dev);
+		vb2_video_unregister_device(&v4l2->vbi_dev);
 	}
 	if (video_is_registered(&v4l2->vdev)) {
 		dev_info(&dev->intf->dev,
 			 "V4L2 device %s deregistered\n",
 			 video_device_node_name(&v4l2->vdev));
-		video_unregister_device(&v4l2->vdev);
+		vb2_video_unregister_device(&v4l2->vdev);
 	}
 
-	v4l2_ctrl_handler_free(&v4l2->ctrl_handler);
-	v4l2_device_unregister(&v4l2->v4l2_dev);
-err:
+	em28xx_v4l2_dev_unregister(dev);
+free_v4l2:
+	kfree(v4l2);
 	dev->v4l2 = NULL;
-	kref_put(&v4l2->ref, em28xx_free_v4l2);
+err:
 	mutex_unlock(&dev->lock);
 	return ret;
 }
