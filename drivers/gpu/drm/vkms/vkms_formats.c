@@ -7,6 +7,10 @@ format_transform_func get_fmt_transform_function(u32 format)
 {
 	if (format == DRM_FORMAT_ARGB8888)
 		return &ARGB8888_to_ARGB16161616;
+	else if (format == DRM_FORMAT_ARGB16161616)
+		return &get_ARGB16161616;
+	else if (format == DRM_FORMAT_XRGB16161616)
+		return &XRGB16161616_to_ARGB16161616;
 	else
 		return &XRGB8888_to_ARGB16161616;
 }
@@ -15,6 +19,10 @@ format_transform_func get_wb_fmt_transform_function(u32 format)
 {
 	if (format == DRM_FORMAT_ARGB8888)
 		return &convert_to_ARGB8888;
+	else if (format == DRM_FORMAT_ARGB16161616)
+		return &convert_to_ARGB16161616;
+	else if (format == DRM_FORMAT_XRGB16161616)
+		return &convert_to_XRGB16161616;
 	else
 		return &convert_to_XRGB8888;
 }
@@ -89,6 +97,35 @@ void XRGB8888_to_ARGB16161616(struct vkms_frame_info *frame_info, int y,
 	}
 }
 
+void get_ARGB16161616(struct vkms_frame_info *frame_info, int y,
+		      struct line_buffer *stage_buffer)
+{
+	u16 *src_pixels = get_packed_src_addr(frame_info, y);
+	int x, x_limit = drm_rect_width(&frame_info->dst);
+
+	for (x = 0; x < x_limit; x++, src_pixels += 4) {
+		stage_buffer[x].a = src_pixels[3];
+		stage_buffer[x].r = src_pixels[2];
+		stage_buffer[x].g = src_pixels[1];
+		stage_buffer[x].b = src_pixels[0];
+	}
+}
+
+void XRGB16161616_to_ARGB16161616(struct vkms_frame_info *frame_info, int y,
+				  struct line_buffer *stage_buffer)
+{
+	u16 *src_pixels = get_packed_src_addr(frame_info, y);
+	int x, x_limit = drm_rect_width(&frame_info->dst);
+
+	for (x = 0; x < x_limit; x++, src_pixels += 4) {
+		stage_buffer[x].a = (u16)0xffff;
+		stage_buffer[x].r = src_pixels[2];
+		stage_buffer[x].g = src_pixels[1];
+		stage_buffer[x].b = src_pixels[0];
+	}
+}
+
+
 /*
  * The following  functions take an line of ARGB16161616 pixels from the
  * src_buffer, convert them to a specific format, and store them in the
@@ -134,5 +171,35 @@ void convert_to_XRGB8888(struct vkms_frame_info *frame_info,
 		dst_pixels[2] = DIV_ROUND_UP(src_buffer[x].r, 257);
 		dst_pixels[1] = DIV_ROUND_UP(src_buffer[x].g, 257);
 		dst_pixels[0] = DIV_ROUND_UP(src_buffer[x].b, 257);
+	}
+}
+
+void convert_to_ARGB16161616(struct vkms_frame_info *frame_info, int y,
+			     struct line_buffer *src_buffer)
+{
+	int x, x_dst = frame_info->dst.x1;
+	u16 *dst_pixels = packed_pixels_addr(frame_info, x_dst, y);
+	int x_limit = drm_rect_width(&frame_info->dst);
+
+	for (x = 0; x < x_limit; x++, dst_pixels += 4) {
+		dst_pixels[3] = src_buffer[x].a;
+		dst_pixels[2] = src_buffer[x].r;
+		dst_pixels[1] = src_buffer[x].g;
+		dst_pixels[0] = src_buffer[x].b;
+	}
+}
+
+void convert_to_XRGB16161616(struct vkms_frame_info *frame_info, int y,
+			     struct line_buffer *src_buffer)
+{
+	int x, x_dst = frame_info->dst.x1;
+	u16 *dst_pixels = packed_pixels_addr(frame_info, x_dst, y);
+	int x_limit = drm_rect_width(&frame_info->dst);
+
+	for (x = 0; x < x_limit; x++, dst_pixels += 4) {
+		dst_pixels[3] = src_buffer[x].a;
+		dst_pixels[2] = src_buffer[x].r;
+		dst_pixels[1] = src_buffer[x].g;
+		dst_pixels[0] = src_buffer[x].b;
 	}
 }
