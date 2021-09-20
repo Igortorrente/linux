@@ -97,6 +97,19 @@ static void get_ARGB16161616(struct vkms_composer *composer, int y,
 	}
 }
 
+static void XRGB16161616_to_ARGB16161616(struct vkms_composer *composer, int y,
+					 u64 *line_buffer)
+{
+	int i, x_src = composer->src.x1 >> 16;
+	__le64 *src_pixels = packed_pixels_addr(composer, x_src, y);
+
+	for_each_pixel_in_line(i, composer) {
+		line_buffer[i] = le64_to_cpu(*src_pixels) | (0xffffllu << 48);
+
+		src_pixels++;
+	}
+}
+
 /*
  * The following functions are used as blend operations. But unlike the
  * `alpha_blend`, these functions take an ARGB16161616 pixel from the
@@ -161,6 +174,19 @@ static void convert_to_ARGB16161616(struct vkms_composer *src_composer,
 	for_each_pixel_in_line(i, src_composer) {
 
 		*dst_pixels = cpu_to_le64(line_buffer[i]);
+		dst_pixels++;
+	}
+}
+
+static void convert_to_XRGB16161616(struct vkms_composer *src_composer,
+				    struct vkms_composer *dst_composer,
+				    int y, u64 *line_buffer)
+{
+	int i, x_dst = src_composer->dst.x1;
+	__le64 *dst_pixels = packed_pixels_addr(dst_composer, x_dst, y);
+
+	for_each_pixel_in_line(i, src_composer) {
+		*dst_pixels = cpu_to_le64(line_buffer[i] | (0xffffllu << 48));
 		dst_pixels++;
 	}
 }
