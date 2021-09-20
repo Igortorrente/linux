@@ -48,6 +48,20 @@ u64 XRGB8888_to_ARGB16161616(struct vkms_composer *composer, int y, int x)
 	       ((u64)pixel_addr[0] * 257);
 }
 
+u64 ARGB16161616_to_ARGB16161616(struct vkms_composer *composer, int y, int x)
+{
+	__le64 *pixel_addr = packed_pixels_addr(composer, y, x);
+
+	return le64_to_cpu(*pixel_addr);
+}
+
+u64 XRGB16161616_to_ARGB16161616(struct vkms_composer *composer, int y, int x)
+{
+	__le64 *pixel_addr = packed_pixels_addr(composer, y, x);
+
+	return le64_to_cpu(*pixel_addr) | (0xffffllu << 48);
+}
+
 void convert_to_ARGB8888(u64 argb_src1, u64 argb_src2, int y, int x,
 			 struct vkms_composer *dst_composer)
 {
@@ -79,9 +93,18 @@ void convert_to_XRGB8888(u64 argb_src1, u64 argb_src2, int y, int x,
 	pixel_addr[3] = (u8)0xffllu;
 }
 
-u64 ARGB16161616_to_ARGB16161616(struct vkms_composer *composer, int y, int x)
+void convert_to_ARGB16161616(u64 argb_src1, u64 argb_src2, int y, int x,
+			     struct vkms_composer *dst_composer)
 {
-	__le64 *pixel_addr = packed_pixels_addr(composer, y, x);
+	__le64 *pixel_addr = packed_pixels_addr(dst_composer, y, x);
 
-	return le64_to_cpu(*pixel_addr);
+	*pixel_addr = cpu_to_le64(argb_src1);
+}
+
+void convert_to_XRGB16161616(u64 argb_src1, u64 argb_src2, int y, int x,
+			     struct vkms_composer *dst_composer)
+{
+	__le64 *pixel_addr = packed_pixels_addr(dst_composer, y, x);
+
+	*pixel_addr = cpu_to_le64(argb_src1 | (0xffffllu << 48));
 }
