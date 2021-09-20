@@ -17,15 +17,28 @@
 #define INT_TO_FIXED(a) ((a) << SHIFT)
 #define FIXED_MUL(a, b) ((s32)(((s64)(a) * (b)) >> SHIFT))
 #define FIXED_DIV(a, b) ((s32)(((s64)(a) << SHIFT) / (b)))
+/* Conversion from long float (Double) to Fixed-Point */
+#define LF_TO_FIXED(a) ((a) * (u64)(1 << SHIFT))
 /* This macro converts a fixed point number to int, and round half up it */
 #define FIXED_TO_INT_ROUND(a) (((a) + (1 << (SHIFT - 1))) >> SHIFT)
 #define INT_TO_FIXED_DIV(a, b) (FIXED_DIV(INT_TO_FIXED(a), INT_TO_FIXED(b)))
-#define INT_TO_FIXED_DIV(a, b) (FIXED_DIV(INT_TO_FIXED(a), INT_TO_FIXED(b)))
+
+#define get_uv_plane_offset get_v_plane_offset
+
+static int row_offset(const struct vkms_frame_info *frame_info, int y)
+{
+	return frame_info->offset + (y * frame_info->pitch);
+}
 
 static size_t pixel_offset(const struct vkms_frame_info *frame_info, int x, int y)
 {
-	return frame_info->offset + (y * frame_info->pitch)
-				  + (x * frame_info->cpp);
+	return row_offset(frame_info, y) + (x * frame_info->cpp);
+}
+
+static void *get_v_plane_offset(const struct vkms_frame_info *frame_info,
+				u8 *src_addr, int y)
+{
+	return (u8 *)src_addr + row_offset(frame_info, y);
 }
 
 /*
@@ -153,6 +166,78 @@ static void RGB565_to_argb_u16(struct line_buffer *stage_buffer,
 	}
 }
 
+static struct pixel_argb_u16 yuv_8bits_to_argb16161616(int y, int u, int v)
+{
+	int fp_y = INT_TO_FIXED(y);
+	int fp_u = INT_TO_FIXED(u);
+	int fp_v = INT_TO_FIXED(v);
+	int hr = INT_TO_FIXED(128);
+
+	int fp_r = fp_y + FIXED_MUL(LF_TO_FIXED(1.370705), fp_v - hr);
+	int fp_g = fp_y - FIXED_MUL(LF_TO_FIXED(0.698001), fp_v - hr)
+			- FIXED_MUL(LF_TO_FIXED(0.337633), fp_u - hr);
+	int fp_b = fp_y + FIXED_MUL(LF_TO_FIXED(1.732446), fp_u - hr);
+
+	int r = FIXED_TO_INT_ROUND(fp_r);
+	int g = FIXED_TO_INT_ROUND(fp_g);
+	int b = FIXED_TO_INT_ROUND(fp_b);
+
+	r = clamp(r, 0, 255);
+	g = clamp(g, 0, 255);
+	b = clamp(b, 0, 255);
+
+	return (struct pixel_argb_u16) {
+			.a = (u16)0xffff,
+			.r = (u16)r * 257,
+			.g = (u16)g * 257,
+			.b = (u16)b * 257,
+		};
+}
+
+static void YUV420_to_argb_u16(struct line_buffer *stage_buffer,
+			       const struct vkms_frame_info *frame_info, int y)
+{
+	struct pixel_argb_u16 *out_pixels = stage_buffer->pixels;
+	int x_limit = min_t(size_t, drm_rect_width(&frame_info->dst),
+			    stage_buffer->n_pixels);
+	u8 *src_addr = (u8 *)frame_info->map[0].vaddr;
+
+	u8 *u_plane_offset = get_v_plane_offset(frame_info, src_addr, x_limit);
+	u8 *v_plane_offset = u_plane_offset + frame_info->pitch;
+	int y_offset = row_offset(frame_info, y);
+
+	for (size_t x = 0; x < x_limit; x++) {
+		int uv_offset = (x / 2 + y / 2) * frame_info->cpp;
+
+		u8 Y = src_addr[y_offset + x];
+		u8 U = u_plane_offset[uv_offset];
+		u8 V = v_plane_offset[uv_offset];
+
+		out_pixels[x] = yuv_8bits_to_argb16161616(Y, U, V);
+	}
+}
+
+static void NV12_to_argb_u16(struct line_buffer *stage_buffer,
+			     const struct vkms_frame_info *frame_info, int y)
+{
+	struct pixel_argb_u16 *out_pixels = stage_buffer->pixels;
+	int x_limit = min_t(size_t, drm_rect_width(&frame_info->dst),
+			    stage_buffer->n_pixels);
+	u8 *src_addr = frame_info->map[0].vaddr;
+
+	u8 *uv_plane_offset = get_uv_plane_offset(frame_info, src_addr, x_limit);
+	int y_offset = row_offset(frame_info, y);
+
+	for (size_t x = 0; x < x_limit; x++) {
+		int uv_offset = y / 2 * frame_info->pitch + x / 2 * frame_info->cpp;
+
+		u8 Y = src_addr[y_offset + x];
+		u8 U = uv_plane_offset[uv_offset];
+		u8 V = uv_plane_offset[uv_offset + 1];
+
+		out_pixels[x] = yuv_8bits_to_argb16161616(Y, U, V);
+	}
+}
 
 /*
  * The following  functions take an line of argb_u16 pixels from the
@@ -265,6 +350,86 @@ static void argb_u16_to_RGB565(struct vkms_frame_info *frame_info,
 	}
 }
 
+static void rgb_16bits_to_yuv_8bits(const struct pixel_argb_u16 *argb,
+				    u8 *y, u8 *u, u8 *v)
+{
+	// maybe: int r = DIV_ROUND_CLOSEST((argb->r * argb->a) / 0xffff, 257);
+	int r = DIV_ROUND_CLOSEST(argb->r, 257);
+	int g = DIV_ROUND_CLOSEST(argb->g, 257);
+	int b = DIV_ROUND_CLOSEST(argb->b, 257);
+
+	int fp_r = INT_TO_FIXED(r);
+	int fp_g = INT_TO_FIXED(g);
+	int fp_b = INT_TO_FIXED(b);
+
+	int fp_y = FIXED_MUL(LF_TO_FIXED(0.299), fp_r)
+		 + FIXED_MUL(LF_TO_FIXED(0.587), fp_g)
+		 + FIXED_MUL(LF_TO_FIXED(0.114), fp_b);
+	int fp_u = FIXED_MUL(LF_TO_FIXED(-0.147), fp_r)
+		 - FIXED_MUL(LF_TO_FIXED(0.289), fp_g)
+		 + FIXED_MUL(LF_TO_FIXED(0.436), fp_b);
+	int fp_v = FIXED_MUL(LF_TO_FIXED(0.615), fp_r)
+		 - FIXED_MUL(LF_TO_FIXED(0.515), fp_g)
+		 - FIXED_MUL(LF_TO_FIXED(0.100), fp_b);
+
+	int Y = FIXED_TO_INT_ROUND(fp_y);
+	int U = FIXED_TO_INT_ROUND(fp_u);
+	int V = FIXED_TO_INT_ROUND(fp_v);
+
+	*y = clamp(Y, 0, 255);
+	*u = clamp(U, 0, 255);
+	*v = clamp(V, 0, 255);
+}
+
+static void argb_u16_to_YUV420(struct vkms_frame_info *frame_info,
+			       const struct line_buffer *src_buffer, int y)
+{
+	struct pixel_argb_u16 *in_pixels = src_buffer->pixels;
+	int x_limit = min_t(size_t, drm_rect_width(&frame_info->dst),
+			    src_buffer->n_pixels);
+	u8 *dst_addr = frame_info->map[0].vaddr;
+
+	u8 *u_plane_offset = get_v_plane_offset(frame_info, dst_addr, x_limit);
+	u8 *v_plane_offset = u_plane_offset + frame_info->pitch;
+	int y_offset = row_offset(frame_info, y);
+
+	for (size_t x = 0; x < x_limit; x++) {
+		int uv_offset = (x / 2 + y / 2) * frame_info->cpp;
+		u8 Y, U, V;
+
+		rgb_16bits_to_yuv_8bits(&in_pixels[x], &Y, &U, &V);
+
+		dst_addr[y_offset + x] = Y;
+		u_plane_offset[uv_offset] = U;
+		v_plane_offset[uv_offset] = V;
+	}
+}
+
+static void argb_u16_to_NV12(struct vkms_frame_info *frame_info,
+			     const struct line_buffer *src_buffer, int y)
+{
+	struct pixel_argb_u16 *in_pixels = src_buffer->pixels;
+	int x_limit = min_t(size_t, drm_rect_width(&frame_info->dst),
+			    src_buffer->n_pixels);
+	u8 *dst_addr = frame_info->map[0].vaddr;
+
+	u8 *uv_plane_offset = get_uv_plane_offset(frame_info, dst_addr, x_limit);
+
+	int y_offset = row_offset(frame_info, y);
+
+	for (size_t x = 0; x < x_limit; x++) {
+		int uv_offset = y / 2 * frame_info->pitch
+			      + x / 2 * frame_info->cpp;
+		u8 Y, U, V;
+
+		rgb_16bits_to_yuv_8bits(&in_pixels[x], &Y, &U, &V);
+
+		dst_addr[y_offset + x] = Y;
+		uv_plane_offset[uv_offset] = U;
+		uv_plane_offset[uv_offset + 1] = V;
+	}
+}
+
 frame_to_line_func get_frame_to_line_function(u32 format)
 {
 	switch (format) {
@@ -278,6 +443,10 @@ frame_to_line_func get_frame_to_line_function(u32 format)
 		return &XRGB16161616_to_argb_u16;
 	case DRM_FORMAT_RGB565:
 		return &RGB565_to_argb_u16;
+	case DRM_FORMAT_NV12:
+		return &NV12_to_argb_u16;
+	case DRM_FORMAT_YUV420:
+		return &YUV420_to_argb_u16;
 	default:
 		return NULL;
 	}
@@ -296,6 +465,10 @@ line_to_frame_func get_line_to_frame_function(u32 format)
 		return &argb_u16_to_XRGB16161616;
 	case DRM_FORMAT_RGB565:
 		return &argb_u16_to_RGB565;
+	case DRM_FORMAT_NV12:
+		return &argb_u16_to_NV12;
+	case DRM_FORMAT_YUV420:
+		return &argb_u16_to_YUV420;
 	default:
 		return NULL;
 	}
