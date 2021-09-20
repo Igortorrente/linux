@@ -5,8 +5,14 @@
 #define pixel_offset(composer, y, x) \
 	((composer)->offset + ((y) * (composer)->pitch) + ((x) * (composer)->cpp))
 
+#define get_v_plane_offset(composer, src_addr, h) \
+	((u8 *)(src_addr) + (composer)->offset + (h) * (composer)->pitch)
+
+#define get_uv_plane_offset get_v_plane_offset
+
 /*
  * FP stands for _Fixed Point_ and **not** _Float Point_
+ * LF stands for Long Float (i.e. double)
  * The following macros help doing fixed point arithmetic.
  */
 /* With FP scale 19 we have 13 and 19 bits of integer and fractional parts
@@ -75,8 +81,8 @@ u64 RGB565_to_ARGB16161616(struct vkms_composer *composer, int y, int x)
 	int fp_b = INT_TO_FP(rgb_565 & 0x1f);
 
 	/*
-	* The magic constants came from 65535(2^16 - 1) divided by
-	* 31(2^5 -1) and 63(2^6 - 1) respectively.
+	* The magic ratio constants came from 65535(2^16 - 1) divided by
+	* 31(2^5 - 1) and 63(2^6 - 1) respectively.
 	*/
 	int fp_rb_ratio = LF_TO_FP(2114.032258065);
 	int fp_g_ratio = LF_TO_FP(1040.238095238);
@@ -86,6 +92,71 @@ u64 RGB565_to_ARGB16161616(struct vkms_composer *composer, int y, int x)
 	u64 b = (u64)FP_TO_INT_ROUND(FP_MUL(fp_b, fp_rb_ratio));
 
 	return 0xffffllu << 48 | r << 32 | g << 16 | b;
+}
+
+u64 yuv_8bit_to_argb16161616(int y, int u, int v)
+{
+	int r, g, b;
+	u64 output;
+	int fp_y = INT_TO_FP(y);
+	int fp_u = INT_TO_FP(u);
+	int fp_v = INT_TO_FP(v);
+	int hr = INT_TO_FP(128);
+
+	int fp_r = fp_y + FP_MUL(LF_TO_FP(1.370705), fp_v - hr);
+	int fp_g = fp_y - FP_MUL(LF_TO_FP(0.698001), fp_v - hr)
+			- FP_MUL(LF_TO_FP(0.337633), fp_u - hr);
+	int fp_b = fp_y + FP_MUL(LF_TO_FP(1.732446), fp_u - hr);
+
+	fp_r = FP_TO_INT_ROUND(fp_r);
+	fp_g = FP_TO_INT_ROUND(fp_g);
+	fp_b = FP_TO_INT_ROUND(fp_b);
+
+	r = clamp(fp_r, 0, 255);
+	g = clamp(fp_g, 0, 255);
+	b = clamp(fp_b, 0, 255);
+
+	output = 0xffffllu << 48 |
+		 ((u64)r * 257) << 32 |
+		 ((u64)g * 257) << 16 |
+		 ((u64)b * 257);
+
+	return cpu_to_le64(output);
+}
+
+u64 YUV420_to_ARGB16161616(struct vkms_composer *composer, int y, int x)
+{
+	int h_dst = drm_rect_height(&composer->dst);
+	void *src_addr = (u8 *)composer->map[0].vaddr;
+
+	u8 *u_plane_offset = get_v_plane_offset(composer, src_addr, h_dst);
+	u8 *v_plane_offset = u_plane_offset + composer->pitch;
+
+	int uv_offset = (x / 2 + y / 2) * composer->cpp;
+	int y_offset = pixel_offset(composer, y, x);
+
+	u8 Y = ((u8 *)src_addr)[y_offset];
+	u8 U = u_plane_offset[uv_offset];
+	u8 V = v_plane_offset[uv_offset];
+
+	return yuv_8bit_to_argb16161616(Y, U, V);
+}
+
+u64 NV12_to_ARGB16161616(struct vkms_composer *composer, int y, int x)
+{
+	int h_dst = drm_rect_height(&composer->dst);
+	void *src_addr = (u8 *)composer->map[0].vaddr;
+
+	u8 *uv_plane_offset = get_uv_plane_offset(composer, src_addr, h_dst);
+
+	int uv_offset = y / 2 * composer->pitch + x / 2 * composer->cpp;
+	int y_offset = pixel_offset(composer, y, x);
+
+	u8 Y = ((u8 *)src_addr)[y_offset];
+	u8 U = uv_plane_offset[uv_offset];
+	u8 V = uv_plane_offset[uv_offset + 1];
+
+	return yuv_8bit_to_argb16161616(Y, U, V);
 }
 
 void convert_to_ARGB8888(u64 argb_src1, u64 argb_src2, int y, int x,
@@ -152,4 +223,14 @@ void convert_to_RGB565(u64 argb_src1, u64 argb_src2, int y, int x,
 	u16 b = (u16)FP_TO_INT_ROUND(FP_DIV(fp_b, fp_rb_ratio));
 
 	*pixel_addr = cpu_to_le16(r << 11 | g << 5 | b);
+}
+
+void convert_to_NV12(u64 argb_src1, u64 argb_src2, int y, int x,
+		     struct vkms_composer *dst_composer)
+{
+}
+
+void convert_to_YUV420(u64 argb_src1, u64 argb_src2, int y, int x,
+		       struct vkms_composer *dst_composer)
+{
 }
