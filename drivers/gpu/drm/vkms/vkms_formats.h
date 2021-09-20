@@ -1,0 +1,168 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
+
+#ifndef _VKMS_FORMATS_H_
+#define _VKMS_FORMATS_H_
+
+#include <drm/drm_rect.h>
+
+#define pixel_offset(composer, x, y) \
+	((composer)->offset + ((y) * (composer)->pitch) + ((x) * (composer)->cpp))
+
+#define src_x1(composer) ((composer)->src.x1 >> 16)
+
+#define for_each_pixel_in_line(i, composer)				\
+	for (i = src_x1(composer);					\
+	     i < src_x1(composer) + drm_rect_width(&(composer)->dst);	\
+	     i++)
+
+/*
+ * packed_pixels_addr - Get the pointer to pixel of a given pair of coordinates
+ *
+ * @composer: Buffer metadata
+ * @x: The x(width) coordinate of the 2D buffer
+ * @y: The y(Heigth) coordinate of the 2D buffer
+ *
+ * Takes the information stored in the composer, a pair of coordinates, and
+ * returns the address of the first color channel.
+ * This function assumes the channels are packed together, i.e. a color channel
+ * comes immediately after another. And therefore, this function doesn't work
+ * for YUV with chroma subsampling (e.g. YUV420 and NV21).
+ */
+static void *packed_pixels_addr(struct vkms_composer *composer, int x, int y)
+{
+	int offset = pixel_offset(composer, x, y);
+
+	return (u8 *)composer->map[0].vaddr + offset;
+}
+
+static void ARGB8888_to_ARGB16161616(struct vkms_composer *composer, int y,
+				     u64 *line_buffer)
+{
+	int i, x_src = composer->src.x1 >> 16;
+	u8 *src_pixels = packed_pixels_addr(composer, x_src, y);
+
+	for_each_pixel_in_line(i, composer) {
+		/*
+		 * Organizes the channels in their respective positions and converts
+		 * the 8 bits channel to 16.
+		 * The 257 is the "conversion ratio". This number is obtained by the
+		 * (2^16 - 1) / (2^8 - 1) division. Which, in this case, tries to get
+		 * the best color value in a pixel format with more possibilities.
+		 * And a similar idea applies to others RGB color conversions.
+		 */
+		line_buffer[i] = ((u64)src_pixels[3] * 257) << 48 |
+				 ((u64)src_pixels[2] * 257) << 32 |
+				 ((u64)src_pixels[1] * 257) << 16 |
+				 ((u64)src_pixels[0] * 257);
+
+		src_pixels += 4;
+	}
+}
+
+static void XRGB8888_to_ARGB16161616(struct vkms_composer *composer, int y,
+				     u64 *line_buffer)
+{
+	int i, x_src = composer->src.x1 >> 16;
+	u8 *src_pixels = packed_pixels_addr(composer, x_src, y);
+
+	for_each_pixel_in_line(i, composer) {
+		/*
+		 * The same as the ARGB8888 but with the alpha channel as the
+		 * maximum value as possible.
+		 */
+		line_buffer[i] = 0xffffllu << 48 |
+				 ((u64)src_pixels[2] * 257) << 32 |
+				 ((u64)src_pixels[1] * 257) << 16 |
+				 ((u64)src_pixels[0] * 257);
+
+		src_pixels += 4;
+	}
+}
+
+static void get_ARGB16161616(struct vkms_composer *composer, int y,
+			     u64 *line_buffer)
+{
+	int i, x_src = composer->src.x1 >> 16;
+	__le64 *src_pixels = packed_pixels_addr(composer, x_src, y);
+
+	for_each_pixel_in_line(i, composer) {
+		/*
+		 * Because the format byte order is in little-endian and this code
+		 * needs to run on big-endian machines too, we need modify
+		 * the byte order from little-endian to the CPU native byte order.
+		 */
+		line_buffer[i] = le64_to_cpu(*src_pixels);
+
+		src_pixels++;
+	}
+}
+
+/*
+ * The following functions are used as blend operations. But unlike the
+ * `alpha_blend`, these functions take an ARGB16161616 pixel from the
+ * source, convert it to a specific format, and store it in the destination.
+ *
+ * They are used in the `compose_active_planes` and `write_wb_buffer` to
+ * copy and convert one line of the frame from/to the output buffer to/from
+ * another buffer (e.g. writeback buffer, primary plane buffer).
+ */
+
+static void convert_to_ARGB8888(struct vkms_composer *src_composer,
+				struct vkms_composer *dst_composer,
+				int y, u64 *line_buffer)
+{
+	int i, x_dst = src_composer->dst.x1;
+	u8 *dst_pixels = packed_pixels_addr(dst_composer, x_dst, y);
+
+	for_each_pixel_in_line(i, src_composer) {
+		/*
+		 * This sequence below is important because the format's byte order is
+		 * in little-endian. In the case of the ARGB8888 the memory is
+		 * organized this way:
+		 *
+		 * | Addr     | = blue channel
+		 * | Addr + 1 | = green channel
+		 * | Addr + 2 | = Red channel
+		 * | Addr + 3 | = Alpha channel
+		 */
+		dst_pixels[0] = DIV_ROUND_UP(line_buffer[i] & 0xffff, 257);
+		dst_pixels[1] = DIV_ROUND_UP((line_buffer[i] >> 16) & 0xffff, 257);
+		dst_pixels[2] = DIV_ROUND_UP((line_buffer[i] >> 32) & 0xffff, 257);
+		dst_pixels[3] = DIV_ROUND_UP(line_buffer[i] >> 48, 257);
+
+		dst_pixels += 4;
+	}
+}
+
+static void convert_to_XRGB8888(struct vkms_composer *src_composer,
+				struct vkms_composer *dst_composer,
+				int y, u64 *line_buffer)
+{
+	int i, x_dst = src_composer->dst.x1;
+	u8 *dst_pixels = packed_pixels_addr(dst_composer, x_dst, y);
+
+	for_each_pixel_in_line(i, src_composer) {
+		dst_pixels[0] = DIV_ROUND_UP(line_buffer[i] & 0xffff, 257);
+		dst_pixels[1] = DIV_ROUND_UP((line_buffer[i] >> 16) & 0xffff, 257);
+		dst_pixels[2] = DIV_ROUND_UP((line_buffer[i] >> 32) & 0xffff, 257);
+		dst_pixels[3] = 0xff;
+
+		dst_pixels += 4;
+	}
+}
+
+static void convert_to_ARGB16161616(struct vkms_composer *src_composer,
+				    struct vkms_composer *dst_composer,
+				    int y, u64 *line_buffer)
+{
+	int i, x_dst = src_composer->dst.x1;
+	__le64 *dst_pixels = packed_pixels_addr(dst_composer, x_dst, y);
+
+	for_each_pixel_in_line(i, src_composer) {
+
+		*dst_pixels = cpu_to_le64(line_buffer[i]);
+		dst_pixels++;
+	}
+}
+
+#endif /* _VKMS_FORMATS_H_ */
