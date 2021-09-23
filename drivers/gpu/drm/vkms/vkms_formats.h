@@ -16,6 +16,26 @@
 	     i++)
 
 /*
+ * FP stands for _Fixed Point_ and **not** _Float Point_
+ * LF stands for Long Float (i.e. double)
+ * The following macros help doing fixed point arithmetic.
+ */
+/*
+ * With FP scale 15 we have 17 and 15 bits of integer and fractional parts
+ * respectively.
+ *  | 0000 0000 0000 0000 0.000 0000 0000 0000 |
+ * 31                                          0
+ */
+#define FP_SCALE 15
+
+#define LF_TO_FP(a) ((a) * (u64)(1 << FP_SCALE))
+#define INT_TO_FP(a) ((a) << FP_SCALE)
+#define FP_MUL(a, b) ((s32)(((s64)(a) * (b)) >> FP_SCALE))
+#define FP_DIV(a, b) ((s32)(((s64)(a) << FP_SCALE) / (b)))
+/* This macro converts a fixed point number to int, and round half up it */
+#define FP_TO_INT_ROUND_UP(a) (((a) + (1 << (FP_SCALE - 1))) >> FP_SCALE)
+
+/*
  * packed_pixels_addr - Get the pointer to pixel of a given pair of coordinates
  *
  * @composer: Buffer metadata
@@ -110,6 +130,35 @@ static void XRGB16161616_to_ARGB16161616(struct vkms_composer *composer, int y,
 	}
 }
 
+static void RGB565_to_ARGB16161616(struct vkms_composer *composer, int y,
+				   u64 *line_buffer)
+{
+	int i, x_src = composer->src.x1 >> 16;
+	__le16 *src_pixels = packed_pixels_addr(composer, x_src, y);
+
+	for_each_pixel_in_line(i, composer) {
+		u16 rgb_565 = le16_to_cpu(*src_pixels);
+		int fp_r = INT_TO_FP((rgb_565 >> 11) & 0x1f);
+		int fp_g = INT_TO_FP((rgb_565 >> 5) & 0x3f);
+		int fp_b = INT_TO_FP(rgb_565 & 0x1f);
+
+		/*
+		 * The magic constants is the "conversion ratio" and is calculated
+		 * dividing 65535(2^16 - 1) by 31(2^5 -1) and 63(2^6 - 1) respectively.
+		 */
+		int fp_rb_ratio = LF_TO_FP(2114.032258065);
+		int fp_g_ratio = LF_TO_FP(1040.238095238);
+
+		u64 r = FP_TO_INT_ROUND_UP(FP_MUL(fp_r, fp_rb_ratio));
+		u64 g = FP_TO_INT_ROUND_UP(FP_MUL(fp_g, fp_g_ratio));
+		u64 b = FP_TO_INT_ROUND_UP(FP_MUL(fp_b, fp_rb_ratio));
+
+		line_buffer[i] = 0xffffllu << 48 | r << 32 | g << 16 | b;
+
+		src_pixels++;
+	}
+}
+
 /*
  * The following functions are used as blend operations. But unlike the
  * `alpha_blend`, these functions take an ARGB16161616 pixel from the
@@ -187,6 +236,30 @@ static void convert_to_XRGB16161616(struct vkms_composer *src_composer,
 
 	for_each_pixel_in_line(i, src_composer) {
 		*dst_pixels = cpu_to_le64(line_buffer[i] | (0xffffllu << 48));
+		dst_pixels++;
+	}
+}
+
+static void convert_to_RGB565(struct vkms_composer *src_composer,
+			      struct vkms_composer *dst_composer,
+			      int y, u64 *line_buffer)
+{
+	int i, x_dst = src_composer->dst.x1;
+	__le16 *dst_pixels = packed_pixels_addr(dst_composer, x_dst, y);
+
+	for_each_pixel_in_line(i, src_composer) {
+		int fp_r = INT_TO_FP((line_buffer[i] >> 32) & 0xffff);
+		int fp_g = INT_TO_FP((line_buffer[i] >> 16) & 0xffff);
+		int fp_b = INT_TO_FP(line_buffer[i] & 0xffffllu);
+
+		int fp_rb_ratio = LF_TO_FP(2114.032258065);
+		int fp_g_ratio = LF_TO_FP(1040.238095238);
+
+		u16 r = FP_TO_INT_ROUND_UP(FP_DIV(fp_r, fp_rb_ratio));
+		u16 g = FP_TO_INT_ROUND_UP(FP_DIV(fp_g, fp_g_ratio));
+		u16 b = FP_TO_INT_ROUND_UP(FP_DIV(fp_b, fp_rb_ratio));
+
+		*dst_pixels = cpu_to_le16(r << 11 | g << 5 | b);
 		dst_pixels++;
 	}
 }
