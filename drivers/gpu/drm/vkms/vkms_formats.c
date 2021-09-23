@@ -5,6 +5,23 @@
 
 #include "vkms_formats.h"
 
+/* The following macros help doing fixed point arithmetic. */
+/*
+ * With Fixed-Point scale 15 we have 17 and 15 bits of integer and fractional
+ * parts respectively.
+ *  | 0000 0000 0000 0000 0.000 0000 0000 0000 |
+ * 31                                          0
+ */
+#define FIXED_SCALE 15
+
+#define INT_TO_FIXED(a) ((a) << FIXED_SCALE)
+#define FIXED_MUL(a, b) ((s32)(((s64)(a) * (b)) >> FIXED_SCALE))
+#define FIXED_DIV(a, b) ((s32)(((s64)(a) << FIXED_SCALE) / (b)))
+/* This macro converts a fixed point number to int, and round half up it */
+#define FIXED_TO_INT_ROUND(a) (((a) + (1 << (FIXED_SCALE - 1))) >> FIXED_SCALE)
+/* Convert divisor and dividend to Fixed-Point and performs the division */
+#define INT_TO_FIXED_DIV(a, b) (FIXED_DIV(INT_TO_FIXED(a), INT_TO_FIXED(b)))
+
 static int pixel_offset(const struct vkms_frame_info *frame_info, int x, int y)
 {
 	return frame_info->offset + (y * frame_info->pitch)
@@ -112,6 +129,30 @@ static void XRGB16161616_to_argb_u16(struct line_buffer *stage_buffer,
 	}
 }
 
+static void RGB565_to_argb_u16(struct line_buffer *stage_buffer,
+			       const struct vkms_frame_info *frame_info, int y)
+{
+	struct pixel_argb_u16 *out_pixels = stage_buffer->pixels;
+	u16 *src_pixels = get_packed_src_addr(frame_info, y);
+	int x, x_limit = min_t(size_t, drm_rect_width(&frame_info->dst),
+			       stage_buffer->n_pixels);
+
+	for (x = 0; x < x_limit; x++, src_pixels++) {
+		u16 rgb_565 = le16_to_cpu(*src_pixels);
+		int fp_r = INT_TO_FIXED((rgb_565 >> 11) & 0x1f);
+		int fp_g = INT_TO_FIXED((rgb_565 >> 5) & 0x3f);
+		int fp_b = INT_TO_FIXED(rgb_565 & 0x1f);
+
+		int fp_rb_ratio = INT_TO_FIXED_DIV(65535, 31);
+		int fp_g_ratio = INT_TO_FIXED_DIV(65535, 63);
+
+		out_pixels[x].a = (u16)0xffff;
+		out_pixels[x].r = FIXED_TO_INT_ROUND(FIXED_MUL(fp_r, fp_rb_ratio));
+		out_pixels[x].g = FIXED_TO_INT_ROUND(FIXED_MUL(fp_g, fp_g_ratio));
+		out_pixels[x].b = FIXED_TO_INT_ROUND(FIXED_MUL(fp_b, fp_rb_ratio));
+	}
+}
+
 
 /*
  * The following  functions take an line of argb_u16 pixels from the
@@ -199,6 +240,31 @@ static void argb_u16_to_XRGB16161616(struct vkms_frame_info *frame_info,
 	}
 }
 
+static void argb_u16_to_RGB565(struct vkms_frame_info *frame_info,
+			       const struct line_buffer *src_buffer, int y)
+{
+	int x, x_dst = frame_info->dst.x1;
+	u16 *dst_pixels = packed_pixels_addr(frame_info, x_dst, y);
+	struct pixel_argb_u16 *in_pixels = src_buffer->pixels;
+	int x_limit = min_t(size_t, drm_rect_width(&frame_info->dst),
+			    src_buffer->n_pixels);
+
+	for (x = 0; x < x_limit; x++, dst_pixels++) {
+		int fp_r = INT_TO_FIXED(in_pixels[x].r);
+		int fp_g = INT_TO_FIXED(in_pixels[x].g);
+		int fp_b = INT_TO_FIXED(in_pixels[x].b);
+
+		int fp_rb_ratio = INT_TO_FIXED_DIV(65535, 31);
+		int fp_g_ratio = INT_TO_FIXED_DIV(65535, 63);
+
+		u16 r = FIXED_TO_INT_ROUND(FIXED_DIV(fp_r, fp_rb_ratio));
+		u16 g = FIXED_TO_INT_ROUND(FIXED_DIV(fp_g, fp_g_ratio));
+		u16 b = FIXED_TO_INT_ROUND(FIXED_DIV(fp_b, fp_rb_ratio));
+
+		*dst_pixels = cpu_to_le16(r << 11 | g << 5 | b);
+	}
+}
+
 plane_format_transform_func get_plane_fmt_transform_function(u32 format)
 {
 	if (format == DRM_FORMAT_ARGB8888)
@@ -209,6 +275,8 @@ plane_format_transform_func get_plane_fmt_transform_function(u32 format)
 		return &ARGB16161616_to_argb_u16;
 	else if (format == DRM_FORMAT_XRGB16161616)
 		return &XRGB16161616_to_argb_u16;
+	else if (format == DRM_FORMAT_RGB565)
+		return &RGB565_to_argb_u16;
 	else
 		return NULL;
 }
@@ -223,6 +291,8 @@ wb_format_transform_func get_wb_fmt_transform_function(u32 format)
 		return &argb_u16_to_ARGB16161616;
 	else if (format == DRM_FORMAT_XRGB16161616)
 		return &argb_u16_to_XRGB16161616;
+	else if (format == DRM_FORMAT_RGB565)
+		return &argb_u16_to_RGB565;
 	else
 		return NULL;
 }
