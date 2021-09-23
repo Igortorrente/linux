@@ -21,6 +21,9 @@ void get_ARGB16161616(struct vkms_frame_info *frame_info, int y,
 void XRGB16161616_to_ARGB16161616(struct vkms_frame_info *frame_info, int y,
 				  struct line_buffer *stage_buffer);
 
+void RGB565_to_ARGB16161616(struct vkms_frame_info *frame_info, int y,
+			    struct line_buffer *stage_buffer);
+
 void convert_to_ARGB8888(struct vkms_frame_info *frame_info, int y,
 			 struct line_buffer *src_buffer);
 
@@ -32,6 +35,9 @@ void convert_to_ARGB16161616(struct vkms_frame_info *frame_info, int y,
 
 void convert_to_XRGB16161616(struct vkms_frame_info *frame_info, int y,
 			     struct line_buffer *src_buffer);
+
+void convert_to_RGB565(struct vkms_frame_info *frame_info, int y,
+		       struct line_buffer *src_buffer);
 
 typedef void (*format_transform_func)(struct vkms_frame_info *frame_info, int y,
 				      struct line_buffer *buffer);

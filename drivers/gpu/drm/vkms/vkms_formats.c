@@ -11,6 +11,8 @@ format_transform_func get_fmt_transform_function(u32 format)
 		return &get_ARGB16161616;
 	else if (format == DRM_FORMAT_XRGB16161616)
 		return &XRGB16161616_to_ARGB16161616;
+	else if (format == DRM_FORMAT_RGB565)
+		return &RGB565_to_ARGB16161616;
 	else
 		return &XRGB8888_to_ARGB16161616;
 }
@@ -23,6 +25,8 @@ format_transform_func get_wb_fmt_transform_function(u32 format)
 		return &convert_to_ARGB16161616;
 	else if (format == DRM_FORMAT_XRGB16161616)
 		return &convert_to_XRGB16161616;
+	else if (format == DRM_FORMAT_RGB565)
+		return &convert_to_RGB565;
 	else
 		return &convert_to_XRGB8888;
 }
@@ -32,6 +36,26 @@ static int pixel_offset(struct vkms_frame_info *frame_info, int x, int y)
 	return frame_info->offset + (y * frame_info->pitch)
 				  + (x * frame_info->cpp);
 }
+
+/*
+ * FP stands for _Fixed Point_ and **not** _Float Point_
+ * LF stands for Long Float (i.e. double)
+ * The following macros help doing fixed point arithmetic.
+ */
+/*
+ * With FP scale 15 we have 17 and 15 bits of integer and fractional parts
+ * respectively.
+ *  | 0000 0000 0000 0000 0.000 0000 0000 0000 |
+ * 31                                          0
+ */
+#define FP_SCALE 15
+
+#define LF_TO_FP(a) ((a) * (u64)(1 << FP_SCALE))
+#define INT_TO_FP(a) ((a) << FP_SCALE)
+#define FP_MUL(a, b) ((s32)(((s64)(a) * (b)) >> FP_SCALE))
+#define FP_DIV(a, b) ((s32)(((s64)(a) << FP_SCALE) / (b)))
+/* This macro converts a fixed point number to int, and round half up it */
+#define FP_TO_INT_ROUND_UP(a) (((a) + (1 << (FP_SCALE - 1))) >> FP_SCALE)
 
 /*
  * packed_pixels_addr - Get the pointer to pixel of a given pair of coordinates
@@ -125,6 +149,33 @@ void XRGB16161616_to_ARGB16161616(struct vkms_frame_info *frame_info, int y,
 	}
 }
 
+void RGB565_to_ARGB16161616(struct vkms_frame_info *frame_info, int y,
+			    struct line_buffer *stage_buffer)
+{
+	u16 *src_pixels = get_packed_src_addr(frame_info, y);
+	int x, x_limit = drm_rect_width(&frame_info->dst);
+
+	for (x = 0; x < x_limit; x++, src_pixels++) {
+		u16 rgb_565 = le16_to_cpu(*src_pixels);
+		int fp_r = INT_TO_FP((rgb_565 >> 11) & 0x1f);
+		int fp_g = INT_TO_FP((rgb_565 >> 5) & 0x3f);
+		int fp_b = INT_TO_FP(rgb_565 & 0x1f);
+
+		/*
+		 * The magic constants is the "conversion ratio" and is calculated
+		 * dividing 65535(2^16 - 1) by 31(2^5 -1) and 63(2^6 - 1)
+		 * respectively.
+		 */
+		int fp_rb_ratio = LF_TO_FP(2114.032258065);
+		int fp_g_ratio = LF_TO_FP(1040.238095238);
+
+		stage_buffer[x].a = (u16)0xffff;
+		stage_buffer[x].r = FP_TO_INT_ROUND_UP(FP_MUL(fp_r, fp_rb_ratio));
+		stage_buffer[x].g = FP_TO_INT_ROUND_UP(FP_MUL(fp_g, fp_g_ratio));
+		stage_buffer[x].b = FP_TO_INT_ROUND_UP(FP_MUL(fp_b, fp_rb_ratio));
+	}
+}
+
 
 /*
  * The following  functions take an line of ARGB16161616 pixels from the
@@ -201,5 +252,28 @@ void convert_to_XRGB16161616(struct vkms_frame_info *frame_info, int y,
 		dst_pixels[2] = src_buffer[x].r;
 		dst_pixels[1] = src_buffer[x].g;
 		dst_pixels[0] = src_buffer[x].b;
+	}
+}
+
+void convert_to_RGB565(struct vkms_frame_info *frame_info, int y,
+		       struct line_buffer *src_buffer)
+{
+	int x, x_dst = frame_info->dst.x1;
+	u16 *dst_pixels = packed_pixels_addr(frame_info, x_dst, y);
+	int x_limit = drm_rect_width(&frame_info->dst);
+
+	for (x = 0; x < x_limit; x++, dst_pixels++) {
+		int fp_r = INT_TO_FP(src_buffer[x].r);
+		int fp_g = INT_TO_FP(src_buffer[x].g);
+		int fp_b = INT_TO_FP(src_buffer[x].b);
+
+		int fp_rb_ratio = LF_TO_FP(2114.032258065);
+		int fp_g_ratio = LF_TO_FP(1040.238095238);
+
+		u16 r = FP_TO_INT_ROUND_UP(FP_DIV(fp_r, fp_rb_ratio));
+		u16 g = FP_TO_INT_ROUND_UP(FP_DIV(fp_g, fp_g_ratio));
+		u16 b = FP_TO_INT_ROUND_UP(FP_DIV(fp_b, fp_rb_ratio));
+
+		*dst_pixels = cpu_to_le16(r << 11 | g << 5 | b);
 	}
 }
