@@ -22,18 +22,36 @@
 
 #define NUM_OVERLAY_PLANES 8
 
-struct vkms_writeback_job {
-	struct dma_buf_map map[DRM_FORMAT_MAX_PLANES];
-	struct dma_buf_map data[DRM_FORMAT_MAX_PLANES];
-};
-
 struct vkms_frame_info {
-	struct drm_framebuffer fb;
+	struct drm_framebuffer *fb;
 	struct drm_rect src, dst;
 	struct dma_buf_map map[DRM_FORMAT_MAX_PLANES];
 	unsigned int offset;
 	unsigned int pitch;
 	unsigned int cpp;
+};
+
+struct pixel_argb_u16 {
+	u16 a, r, g, b;
+};
+
+struct line_buffer {
+	size_t n_pixels;
+	struct pixel_argb_u16 *pixels;
+};
+
+typedef void
+(*wb_format_transform_func)(struct vkms_frame_info *frame_info,
+			    const struct line_buffer *buffer, int y);
+
+typedef void
+(*plane_format_transform_func)(struct line_buffer *buffer,
+			       const struct vkms_frame_info *frame_info, int y);
+
+struct vkms_writeback_job {
+	struct dma_buf_map data[DRM_FORMAT_MAX_PLANES];
+	struct vkms_frame_info frame_info;
+	wb_format_transform_func format_func;
 };
 
 /**
@@ -44,6 +62,7 @@ struct vkms_frame_info {
 struct vkms_plane_state {
 	struct drm_shadow_plane_state base;
 	struct vkms_frame_info *frame_info;
+	plane_format_transform_func format_func;
 };
 
 struct vkms_plane {
