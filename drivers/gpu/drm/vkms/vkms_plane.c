@@ -50,12 +50,12 @@ static void vkms_plane_destroy_state(struct drm_plane *plane,
 	struct vkms_plane_state *vkms_state = to_vkms_plane_state(old_state);
 	struct drm_crtc *crtc = vkms_state->base.base.crtc;
 
-	if (crtc) {
+	if (crtc && vkms_state->composer->fb) {
 		/* dropping the reference we acquired in
 		 * vkms_primary_plane_update()
 		 */
-		if (drm_framebuffer_read_refcount(&vkms_state->composer->fb))
-			drm_framebuffer_put(&vkms_state->composer->fb);
+		if (drm_framebuffer_read_refcount(vkms_state->composer->fb))
+			drm_framebuffer_put(vkms_state->composer->fb);
 	}
 
 	kfree(vkms_state->composer);
@@ -110,9 +110,9 @@ static void vkms_plane_atomic_update(struct drm_plane *plane,
 	composer = vkms_plane_state->composer;
 	memcpy(&composer->src, &new_state->src, sizeof(struct drm_rect));
 	memcpy(&composer->dst, &new_state->dst, sizeof(struct drm_rect));
-	memcpy(&composer->fb, fb, sizeof(struct drm_framebuffer));
+	composer->fb = fb;
 	memcpy(&composer->map, &shadow_plane_state->data, sizeof(composer->map));
-	drm_framebuffer_get(&composer->fb);
+	drm_framebuffer_get(composer->fb);
 	composer->offset = fb->offsets[0];
 	composer->pitch = fb->pitches[0];
 	composer->cpp = fb->format->cpp[0];

@@ -153,7 +153,7 @@ static void compose_plane(struct vkms_composer *primary_composer,
 			  struct vkms_composer *plane_composer,
 			  void *vaddr_out)
 {
-	struct drm_framebuffer *fb = &plane_composer->fb;
+	struct drm_framebuffer *fb = plane_composer->fb;
 	void *vaddr;
 	void (*pixel_blend)(const u8 *p_src, u8 *p_dst);
 
@@ -174,7 +174,7 @@ static int compose_active_planes(void **vaddr_out,
 				 struct vkms_composer *primary_composer,
 				 struct vkms_crtc_state *crtc_state)
 {
-	struct drm_framebuffer *fb = &primary_composer->fb;
+	struct drm_framebuffer *fb = primary_composer->fb;
 	struct drm_gem_object *gem_obj = drm_gem_fb_get_obj(fb, 0);
 	const void *vaddr;
 	int i;
