@@ -8,6 +8,59 @@
 #define pixel_offset(composer, x, y) \
 	((composer)->offset + ((y) * (composer)->pitch) + ((x) * (composer)->cpp))
 
+#define __concat(a, b) a ## b
+
+#define func_name(op_name, src_fmt) \
+	__concat(op_name, src_fmt)
+
+#define func(op_name, src_fmt, ...) \
+	func_name(op_name, src_fmt)(__VA_ARGS__)
+
+#define func_signature(op_name, src_fmt, ...) \
+	static void func(op_name, src_fmt, __VA_ARGS__)
+
+#define func_common_sig(op_name, src_fmt) \
+	func_signature(op_name, src_fmt, \
+		       struct vkms_composer *src_composer, \
+		       struct vkms_composer *dst_composer)
+
+#define for_each_pixel_do(operation) do { \
+	int i, j, j_dst, i_dst; \
+	u64 src_pixel \
+	int x_src = src_composer->src.x1 >> 16; \
+	int y_src = src_composer->src.y1 >> 16; \
+	int x_dst = src_composer->dst.x1; \
+	int y_dst = src_composer->dst.y1; \
+	int h_dst = drm_rect_height(&src_composer->dst); \
+	int w_dst = drm_rect_width(&src_composer->dst); \
+	int y_limit = y_src + h_dst; \
+	int x_limit = x_src + w_dst; \
+	for (i = y_src, i_dst = y_dst; i < y_limit; ++i, i_dst++) { \
+		for (j = x_src, j_dst = x_dst; j < x_limit; ++j, j_dst++) { \
+			operation \
+		} \
+	 } \
+} while(0)
+
+#define blend_to(src_fmt, operation) \
+	func_common_sig(blend_to_, src_fmt) \
+	{ \
+		for_each_pixel_do(operation); \
+		alpha_blend(src_pixel, j, i, dst_composer);
+	}
+
+#define copy_to_wb(output_fmt, operation) \
+	func_common_sig(copy_to_wb_, src_fmt) \
+	{ \
+		for_each_pixel_do(operation); \
+	}
+
+#define copy_plane_to_output(output_fmt, operation) \
+	func_common_sig(copy_plane_to_output_, src_fmt) \
+	{ \
+		for_each_pixel_do(operation); \
+	}
+
 /*
  * packed_pixels_addr - Get the pointer to pixel of a given pair of coordinates
  *
@@ -28,9 +81,11 @@ static void *packed_pixels_addr(struct vkms_composer *composer, int x, int y)
 	return (u8 *)composer->map[0].vaddr + offset;
 }
 
-static u64 ARGB8888_to_ARGB16161616(struct vkms_composer *composer, int x, int y)
-{
-	u8 *pixel_addr = packed_pixels_addr(composer, x, y);
+static void alpha_blend(u64 argb_src, int y, int x,
+			struct vkms_composer *dst_composer);
+
+blend_to(ARGB8888,
+	u8 *pixel_addr = packed_pixels_addr(src_composer, j, i);
 
 	/*
 	 * Organizes the channels in their respective positions and converts
@@ -40,37 +95,38 @@ static u64 ARGB8888_to_ARGB16161616(struct vkms_composer *composer, int x, int y
 	 * the best color value in a color space with more possibilities.
 	 * And a similar idea applies to others RGB color conversions.
 	 */
-	return ((u64)pixel_addr[3] * 257) << 48 |
-	       ((u64)pixel_addr[2] * 257) << 32 |
-	       ((u64)pixel_addr[1] * 257) << 16 |
-	       ((u64)pixel_addr[0] * 257);
-}
+	src_pixel = ((u64)pixel_addr[3] * 257) << 48 |
+			((u64)pixel_addr[2] * 257) << 32 |
+			((u64)pixel_addr[1] * 257) << 16 |
+			((u64)pixel_addr[0] * 257);
 
-static u64 XRGB8888_to_ARGB16161616(struct vkms_composer *composer, int x, int y)
-{
-	u8 *pixel_addr = packed_pixels_addr(composer, x, y);
+)
+
+blend_to(XRGB8888,
+	u8 *pixel_addr = packed_pixels_addr(src_composer, j, i);
 
 	/*
 	 * The same as the ARGB8888 but with the alpha channel as the
 	 * maximum value as possible.
 	 */
-	return 0xffffllu << 48 |
-	       ((u64)pixel_addr[2] * 257) << 32 |
-	       ((u64)pixel_addr[1] * 257) << 16 |
-	       ((u64)pixel_addr[0] * 257);
-}
+	src_pixel = 0xffffllu << 48 |
+			((u64)pixel_addr[2] * 257) << 32 |
+			((u64)pixel_addr[1] * 257) << 16 |
+			((u64)pixel_addr[0] * 257);
 
-static u64 get_ARGB16161616(struct vkms_composer *composer, int x, int y)
-{
-	__le64 *pixel_addr = packed_pixels_addr(composer, x, y);
+	alpha_blend(src_pixel, j, i, dst_composer);
+)
+
+blend_to(ARGB16161616,
+	__le64 *pixel_addr = packed_pixels_addr(src_composer, j, i);
 
 	/*
 	 * Because the format byte order is in little-endian and this code
 	 * needs to run on big-endian machines too, we need modify
 	 * the byte order from little-endian to the CPU native byte order.
 	 */
-	return le64_to_cpu(*pixel_addr);
-}
+	src_pixel = le64_to_cpu(*pixel_addr);
+)
 
 /*
  * The following functions are used as blend operations. But unlike the

@@ -97,83 +97,16 @@ static void alpha_blend(u64 argb_src, int y, int x,
 	output_pixel[3] = 0xffff;
 }
 
-/**
- * @src_composer: source framebuffer's metadata
- * @dst_composer: destiny framebuffer's metadata
- * @funcs: A struct containing all the composition functions(get_src_pixel,
- *         and set_output_pixel)
- *
- * Using the pixel_blend function passed as parameter, this function blends
- * all pixels from src planes into a output buffer (with a blend function
- * passed as parameter).
- * Information of the output buffer is in the dst_composer parameter
- * and the source plane in the src_composer.
- * The get_src_pixel will use the src_composer to get the respective pixel,
- * convert, and return it as ARGB_16161616.
- * And finally, the blend function will receive the dst_composer, src_pixel.
- * Blend, and store thre result in the output using the dst_composer buffer
- * information.
- *
- * TODO: completely clear the primary plane (a = 0xff) before starting to blend
- * pixel color values
- */
-static void blend(struct vkms_composer *src_composer,
-		  struct vkms_composer *dst_composer,
-		  struct vkms_pixel_composition_functions *funcs)
-{
-	int i, j, j_dst, i_dst;
-	u64 pixel_src;
-
-	int x_src = src_composer->src.x1 >> 16;
-	int y_src = src_composer->src.y1 >> 16;
-
-	int x_dst = src_composer->dst.x1;
-	int y_dst = src_composer->dst.y1;
-	int h_dst = drm_rect_height(&src_composer->dst);
-	int w_dst = drm_rect_width(&src_composer->dst);
-
-	int y_limit = y_src + h_dst;
-	int x_limit = x_src + w_dst;
-
-	for (i = y_src, i_dst = y_dst; i < y_limit; ++i, i_dst++) {
-		for (j = x_src, j_dst = x_dst; j < x_limit; ++j, j_dst++) {
-			pixel_src = funcs->get_src_pixel(src_composer, j, i);
-			funcs->set_output_pixel(pixel_src, j_dst, i_dst, dst_composer);
-		}
-	}
-}
-
-static u64 ((*get_pixel_fmt_transform_function(u32 format))
-	    (struct vkms_composer *, int, int))
-{
-	if (format == DRM_FORMAT_ARGB8888)
-		return &ARGB8888_to_ARGB16161616;
-	else if (format == DRM_FORMAT_ARGB16161616)
-		return &get_ARGB16161616;
-	else
-		return &XRGB8888_to_ARGB16161616;
-}
-
-static void ((*get_set_output_pixel_function(u32 format))
-	     (u64, int, int, struct vkms_composer *))
-{
-	if (format == DRM_FORMAT_ARGB8888)
-		return &convert_to_ARGB8888;
-	else if (format == DRM_FORMAT_ARGB16161616)
-		return &convert_to_ARGB16161616;
-	else
-		return &convert_to_XRGB8888;
-}
-
 static void compose_plane(struct vkms_composer *src_composer,
 			  struct vkms_composer *dst_composer,
 			  struct vkms_pixel_composition_functions *funcs)
 {
-	u32 src_format = src_composer->fb.format->format;
-
-	funcs->get_src_pixel = get_pixel_fmt_transform_function(src_format);
-
-	blend(src_composer, dst_composer, funcs);
+	if (format == DRM_FORMAT_ARGB8888)
+		func_name(blend_to_, ARGB8888)(src_composer, dst_composer);
+	else if (format == DRM_FORMAT_ARGB16161616)
+		func_name(blend_to_, ARGB16161616)(src_composer, dst_composer);
+	else
+		func_name(blend_to_, XRGB8888)(src_composer, dst_composer);
 }
 
 static __le64 *compose_active_planes(struct vkms_composer *primary_composer,
