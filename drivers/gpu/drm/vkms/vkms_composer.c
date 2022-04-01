@@ -61,6 +61,15 @@ static bool check_y_limit(struct vkms_frame_info *frame_info, int y)
 	return false;
 }
 
+static void fill_background(struct pixel_argb_u16 *backgroud_color,
+			    struct line_buffer *output_buffer)
+{
+	int i;
+
+	for (i = 0; i < output_buffer->n_pixels; i++)
+		output_buffer->pixels[i] = *backgroud_color;
+}
+
 /**
  * @wb_frame_info: The writeback frame buffer metadata
  * @crtc_state: The crtc state
@@ -78,22 +87,23 @@ static void blend(struct vkms_writeback_job *wb,
 		  struct line_buffer *output_buffer, s64 row_size)
 {
 	struct vkms_plane_state **plane = crtc_state->active_planes;
-	struct vkms_frame_info *primary_plane_info = plane[0]->frame_info;
 	u32 n_active_planes = crtc_state->num_active_planes;
 
-	int y_dst = primary_plane_info->dst.y1;
-	int h_dst = drm_rect_height(&primary_plane_info->dst);
-	int y_limit = y_dst + h_dst;
+	struct pixel_argb_u16 background_color = (struct pixel_argb_u16) {
+		.a = 0xffff
+	};
+
+	int crtc_y_limit = crtc_state->crtc_height;
 	int y, i;
 
-	for (y = y_dst; y < y_limit; y++) {
-		plane[0]->format_func(output_buffer, primary_plane_info, y);
+	for (y = 0; y < crtc_y_limit; y++) {
+		fill_background(&background_color, output_buffer);
 
 		/* If there are other planes besides primary, we consider the active
 		 * planes should be in z-order and compose them associatively:
 		 * ((primary <- overlay) <- cursor)
 		 */
-		for (i = 1; i < n_active_planes; i++) {
+		for (i = 0; i < n_active_planes; i++) {
 			if (!check_y_limit(plane[i]->frame_info, y))
 				continue;
 
@@ -154,7 +164,7 @@ static int compose_active_planes(struct vkms_writeback_job *active_wb,
 	if (WARN_ON(check_format_funcs(crtc_state, active_wb)))
 		return -EINVAL;
 
-	line_width = drm_rect_width(&primary_plane_info->dst);
+	line_width = crtc_state->crtc_width;
 	stage_buffer.n_pixels = line_width;
 	output_buffer.n_pixels = line_width;
 
@@ -175,8 +185,10 @@ static int compose_active_planes(struct vkms_writeback_job *active_wb,
 		struct vkms_frame_info *wb_frame_info = &active_wb->frame_info;
 
 		wb_format = wb_frame_info->fb->format->format;
-		wb_frame_info->src = primary_plane_info->src;
-		wb_frame_info->dst = primary_plane_info->dst;
+		drm_rect_init(&wb_frame_info->src, 0, 0, crtc_state->crtc_width,
+			      crtc_state->crtc_height);
+		drm_rect_init(&wb_frame_info->dst, 0, 0, crtc_state->crtc_width,
+			      crtc_state->crtc_height);
 	}
 
 	blend(active_wb, crtc_state, crc32, &stage_buffer,

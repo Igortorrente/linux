@@ -90,6 +90,8 @@ struct vkms_crtc_state {
 	bool wb_pending;
 	u64 frame_start;
 	u64 frame_end;
+	u16 crtc_width;
+	u16 crtc_height;
 };
 
 struct vkms_output {

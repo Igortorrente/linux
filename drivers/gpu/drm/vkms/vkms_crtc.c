@@ -248,7 +248,9 @@ static void vkms_crtc_atomic_begin(struct drm_crtc *crtc,
 static void vkms_crtc_atomic_flush(struct drm_crtc *crtc,
 				   struct drm_atomic_state *state)
 {
+	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 	struct vkms_output *vkms_output = drm_crtc_to_vkms_output(crtc);
+	struct drm_display_mode *mode = &crtc_state->mode;
 
 	if (crtc->state->event) {
 		spin_lock(&crtc->dev->event_lock);
@@ -264,6 +266,8 @@ static void vkms_crtc_atomic_flush(struct drm_crtc *crtc,
 	}
 
 	vkms_output->composer_state = to_vkms_crtc_state(crtc->state);
+	vkms_output->composer_state->crtc_width = mode->hdisplay;
+	vkms_output->composer_state->crtc_height = mode->vdisplay;
 
 	spin_unlock_irq(&vkms_output->lock);
 }
